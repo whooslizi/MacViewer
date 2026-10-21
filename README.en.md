@@ -10,12 +10,12 @@
 
 ### [Download MacViewer for macOS](https://github.com/DeanOpen/MacViewer/releases/latest)
 
-Latest version, macOS 12 or later
+Latest version, macOS 12 or later · [LinuxViewer for Linux](#linux-linuxviewer-experimental)
 
-[![CI](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml/badge.svg)](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml)
+[![CI](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/DeanOpen/MacViewer?sort=semver)](https://github.com/DeanOpen/MacViewer/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
+![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)
 ![Swift](https://img.shields.io/badge/Swift-6-orange)
 
 <img src="docs/images/main-window.png" width="820" alt="MacViewer main window">
@@ -70,6 +70,8 @@ Windows executable code.
 - You approve viewing or control separately. You can end a session or pause
   incoming access at any time.
 - Copy the Mac's password or **make a new one**; the ID stays the same
+- Set a fixed **master password** in Settings, optionally accepted without
+  asking
 - Set this Mac's **display name** in Settings (unaccented letters, up to 20)
 - Send and receive files from the incoming session's chat, with the same
   save, progress and cancel controls as an outgoing session
@@ -81,9 +83,9 @@ Windows executable code.
 
 ### Not supported yet
 
-Microphone/voice chat, Mac-host audio, and unattended Mac access. Older Windows UltraViewer versions,
-non-US keyboard layouts, input methods other than Vietnamese and Chinese,
-and 8-bit screen mode haven't been validated.
+Microphone/voice chat, Mac-host audio, and unattended Mac access. Mac screen sharing does not send 2x
+Retina images. Older Windows UltraViewer versions, non-US keyboard layouts, input methods other than
+Vietnamese and Chinese, and 8-bit screen mode haven't been validated.
 
 ## Installation
 
@@ -132,6 +134,12 @@ to switch between individual displays and the combined desktop. Display choice
 is remembered on this Mac; if a selected display is disconnected, sharing stops
 instead of switching to a different display.
 
+The shared image is size-limited to save bandwidth: about 2 million pixels when
+sharing one display (roughly 1920 × 1080) and about 8 million pixels when
+sharing multiple displays (roughly 3840 × 2160), preserving each display's
+aspect ratio and position. Retina displays are sent at their logical resolution
+rather than 2x, so a session does not use twice the bandwidth.
+
 Chat and file transfer work in both session roles. Incoming files are written
 only after **Save** and never overwrite an existing file. UltraViewer's native
 host file-name field uses the Windows ANSI code page without declaring it;
@@ -169,6 +177,9 @@ Tools: `session_status`, `screenshot`, `click`, `move_mouse`, `drag`, `scroll`,
   the app over a local socket that only your user account can open.
 - Agents can use the mouse and keyboard only while **Control** is on. Starting or
   ending connections needs its own permission.
+- Agents can see the screen, read chat and read the clipboard only while screen
+  viewing is allowed; writing the clipboard also needs **Control**. **Stop** blocks
+  every agent action except reading the session status until the session ends.
 - MacViewer asks before a new agent acts. While an agent is controlling the
   computer, the session window shows **AI is controlling · Stop**.
 - Before changing an app's config file, MacViewer saves a `.macviewer-backup`
@@ -187,6 +198,53 @@ scripts/package_app.sh release   # build dist/MacViewer.app
 open dist/MacViewer.app
 ```
 
+## Linux (LinuxViewer, experimental)
+
+[`LinuxViewer/`](LinuxViewer/) is a Rust port for Linux. It connects to and
+controls UltraViewer machines, and it can share an X11 or Wayland desktop. See
+[LinuxViewer/README.md](LinuxViewer/README.md).
+
+**Install (Debian, Ubuntu, Linux Mint — x86_64):**
+
+```sh
+curl -L -o linuxviewer.deb https://github.com/DeanOpen/MacViewer/releases/latest/download/linuxviewer-amd64.deb
+sudo apt install ./linuxviewer.deb
+linuxviewer                       # open the connect window
+```
+
+This download is lean: it needs only the C runtime and ALSA, so it installs on
+any distro with one command. It includes everything except **Wayland hosting**
+(viewing, control, X11 hosting, audio, chat and files all work). To host your
+own screen from a Wayland session, use the Wayland build, which also needs
+PipeWire:
+
+```sh
+curl -L -o linuxviewer.deb https://github.com/DeanOpen/MacViewer/releases/latest/download/linuxviewer-wayland-amd64.deb
+sudo apt install ./linuxviewer.deb
+```
+
+**Or the portable tarball** (any distro, no install):
+
+```sh
+curl -L https://github.com/DeanOpen/MacViewer/releases/latest/download/linuxviewer-x86_64.tar.gz | sudo tar -xz -C /
+linuxviewer
+```
+
+**Command line:**
+
+```sh
+linuxviewer connect 123456789   # view and control a machine
+linuxviewer host                # share this Linux desktop
+```
+
+**Build from source** (needs Rust and `libxkbcommon-dev libasound2-dev libpipewire-0.3-dev libclang-dev`):
+
+```sh
+cd LinuxViewer
+cargo build --release
+./target/release/linuxviewer
+```
+
 ## Project layout
 
 ```
@@ -197,6 +255,7 @@ ThirdParty/
   zstd/                   Zstandard 1.5.7 (BSD / GPLv2)
   g722/                   WebRTC G.722 decoder
 Tests/                    Protocol and app unit tests
+LinuxViewer/              Rust port for Linux (viewer + X11 hosting)
 scripts/                  App packaging, icon and DMG generation
 ```
 

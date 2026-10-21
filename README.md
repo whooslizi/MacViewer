@@ -10,12 +10,12 @@
 
 ### [Tải về MacViewer cho macOS](https://github.com/DeanOpen/MacViewer/releases/latest)
 
-Bản mới nhất, macOS 12 trở lên
+Bản mới nhất, macOS 12 trở lên · [LinuxViewer cho Linux](#linux-linuxviewer-thử-nghiệm)
 
-[![CI](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml/badge.svg)](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml)
+[![CI](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/DeanOpen/MacViewer/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/DeanOpen/MacViewer?sort=semver)](https://github.com/DeanOpen/MacViewer/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-lightgrey)
+![Platform](https://img.shields.io/badge/platform-macOS%2012%2B-lightgrey)
 ![Swift](https://img.shields.io/badge/Swift-6-orange)
 
 <img src="docs/images/main-window-vi.png" width="820" alt="Giao diện chính của MacViewer">
@@ -67,6 +67,8 @@ SwiftUI/AppKit, không cần Wine và không chạy bất kỳ file `.exe` nào 
 - Quyền xem và quyền điều khiển được duyệt riêng. Bạn có thể ngắt kết nối hoặc
   tạm khóa truy cập bất cứ lúc nào
 - Sao chép hoặc **tạo mật khẩu mới** cho máy Mac; ID giữ nguyên
+- Đặt **mật khẩu chủ** cố định trong Cài đặt, có thể cho phép kết nối bằng mật khẩu này
+  mà không cần bấm đồng ý
 - Đặt **tên hiển thị** cho máy Mac trong Cài đặt (chữ không dấu, tối đa 20 ký tự)
 - Gửi và nhận file trong chat của phiên truy cập vào Mac, có nút lưu, hủy và
   tiến trình truyền như khi Mac điều khiển máy khác
@@ -78,9 +80,9 @@ SwiftUI/AppKit, không cần Wine và không chạy bất kỳ file `.exe` nào 
 
 ### Chưa hỗ trợ
 
-Nói chuyện qua micro, phát âm thanh khi chia sẻ máy Mac và truy cập không cần người ngồi máy. Chưa thử
-nghiệm với các bản UltraViewer cũ, bàn phím không phải kiểu US, bộ gõ ngoài
-tiếng Việt và tiếng Trung, và chế độ màu 8-bit.
+Nói chuyện qua micro, phát âm thanh khi chia sẻ máy Mac và truy cập không cần người ngồi máy. Khi
+chia sẻ máy Mac, ảnh chưa được gửi ở độ phân giải Retina 2x. Chưa thử nghiệm với các bản UltraViewer
+cũ, bàn phím không phải kiểu US, bộ gõ ngoài tiếng Việt và tiếng Trung, và chế độ màu 8-bit.
 
 ## Cài đặt
 
@@ -132,6 +134,12 @@ từng màn hình hoặc toàn bộ màn hình. Lựa chọn được ghi nhớ 
 Nếu màn hình đã chọn bị ngắt kết nối, phiên chia sẻ dừng thay vì tự chuyển
 sang một màn hình khác.
 
+Ảnh chia sẻ được giới hạn kích thước để tiết kiệm băng thông: khoảng 2 triệu
+điểm ảnh khi chia sẻ một màn hình (tương đương 1920 × 1080) và khoảng 8 triệu
+điểm ảnh khi chia sẻ nhiều màn hình (tương đương 3840 × 2160), giữ đúng tỉ lệ
+và vị trí của từng màn hình. Màn hình Retina được gửi ở độ phân giải logic
+thay vì ảnh 2x, nên phiên không tốn gấp đôi băng thông.
+
 Chat và truyền file hoạt động ở cả hai chiều kết nối. File đến chỉ được lưu
 sau khi bấm **Lưu** và không ghi đè file có sẵn. Trường tên file của UltraViewer
 gốc dùng bảng mã ANSI trên Windows nhưng không báo bảng mã cho bên nhận.
@@ -165,6 +173,9 @@ claude mcp add --scope user macviewer -- /Applications/MacViewer.app/Contents/Ma
   với ứng dụng qua socket cục bộ mà chỉ tài khoản của bạn mở được.
 - Trợ lý chỉ dùng được chuột, bàn phím khi bạn bật **Điều khiển**. Muốn trợ lý tự
   kết nối hoặc ngắt kết nối thì phải bật quyền riêng cho việc đó.
+- Trợ lý chỉ xem được màn hình, đọc chat và đọc clipboard khi bạn cho phép xem màn hình;
+  muốn trợ lý ghi clipboard thì phải bật **Điều khiển**. Bấm **Dừng** sẽ chặn mọi thao tác
+  của trợ lý (trừ xem trạng thái phiên) cho tới khi phiên kết thúc.
 - MacViewer hỏi bạn trước khi một trợ lý mới thao tác. Khi trợ lý đang điều khiển,
   cửa sổ phiên hiện **AI đang điều khiển · Dừng**.
 - Trước khi sửa tệp cấu hình của ứng dụng, MacViewer lưu một bản `.macviewer-backup`.
@@ -183,6 +194,52 @@ scripts/package_app.sh release   # build ra dist/MacViewer.app
 open dist/MacViewer.app
 ```
 
+## Linux (LinuxViewer, thử nghiệm)
+
+[`LinuxViewer/`](LinuxViewer/) là bản cho Linux viết bằng Rust: kết nối và
+điều khiển máy chạy UltraViewer, và cho người khác truy cập màn hình Linux (X11
+hoặc Wayland). Xem [LinuxViewer/README.md](LinuxViewer/README.md).
+
+**Cài đặt (Debian, Ubuntu, Linux Mint — x86_64):**
+
+```sh
+curl -L -o linuxviewer.deb https://github.com/DeanOpen/MacViewer/releases/latest/download/linuxviewer-amd64.deb
+sudo apt install ./linuxviewer.deb
+linuxviewer                       # mở cửa sổ kết nối
+```
+
+Bản tải này gọn nhẹ: chỉ cần thư viện C và ALSA nên cài được trên mọi bản Linux
+bằng một lệnh. Nó có đủ tính năng trừ **chia sẻ màn hình trên Wayland** (xem, điều
+khiển, chia sẻ màn hình X11, âm thanh, chat và gửi file đều chạy). Muốn chia sẻ màn
+hình từ phiên Wayland thì dùng bản Wayland, bản này cần thêm PipeWire:
+
+```sh
+curl -L -o linuxviewer.deb https://github.com/DeanOpen/MacViewer/releases/latest/download/linuxviewer-wayland-amd64.deb
+sudo apt install ./linuxviewer.deb
+```
+
+**Hoặc bản nén chạy ngay** (mọi bản Linux, không cần cài):
+
+```sh
+curl -L https://github.com/DeanOpen/MacViewer/releases/latest/download/linuxviewer-x86_64.tar.gz | sudo tar -xz -C /
+linuxviewer
+```
+
+**Dòng lệnh:**
+
+```sh
+linuxviewer connect 123456789   # xem và điều khiển máy khác
+linuxviewer host                # chia sẻ màn hình Linux
+```
+
+**Build từ mã nguồn** (cần Rust và `libxkbcommon-dev libasound2-dev libpipewire-0.3-dev libclang-dev`):
+
+```sh
+cd LinuxViewer
+cargo build --release
+./target/release/linuxviewer
+```
+
 ## Cấu trúc thư mục
 
 ```
@@ -193,6 +250,7 @@ ThirdParty/
   zstd/                   Thư viện nén Zstandard 1.5.7 (BSD / GPLv2)
   g722/                   Bộ giải mã âm thanh G.722 của WebRTC
 Tests/                    Unit test
+LinuxViewer/              Bản cho Linux viết bằng Rust (xem/điều khiển + chia sẻ X11)
 scripts/                  Script đóng gói app và tạo file DMG
 ```
 

@@ -21,6 +21,9 @@ final class MacHostingModel: ObservableObject {
     @Published private(set) var permissions = MacHostingPermissions.refresh()
     @Published private(set) var displays: [MacSharingDisplay] = []
     @Published private(set) var selectedDisplayKey = MacDisplayLayout.allDisplaysKey
+    @Published private(set) var hasMasterPassword = MacRegistrationProfile.hasMasterPassword()
+    /// A master-password request is being accepted without showing the prompt.
+    @Published private(set) var isAutoApproving = false
 
     /// Invoked only after this Mac's user approves and54 is acknowledged. The
     /// PIN is transient; the outgoing connection must not save it in history.
@@ -44,6 +47,8 @@ final class MacHostingModel: ObservableObject {
     private var displayRevision = UUID()
     private var capturedDisplayRevision: UUID?
     static let displaySelectionKey = "MacViewer.hostDisplaySelection"
+    static let masterPasswordAutoAcceptKey = "MacViewer.masterPasswordAutoAccept"
+    static let autoAcceptAllKey = "MacViewer.autoAcceptAllConnections"
 
     init(defaults: UserDefaults = .standard,
          displayProvider: @escaping @MainActor () -> [MacSharingDisplay] = MacSharingDisplay.current) {
@@ -81,6 +86,48 @@ final class MacHostingModel: ObservableObject {
         permissions = MacHostingPermissions.refresh()
         if phase == .sharing, allowsControl, !canControl { setControlAllowed(false) }
     }
+
+    /// While a viewer is connected the local permission state can change without
+    /// any app activation (System Settings revocation, TCC reset). Re-check at a
+    /// bounded rate during capture so control is revoked promptly and the UI does
+    /// not keep claiming the Mac is controlled.
+    private static let permissionRefreshInterval: TimeInterval = 1
+    private var lastPermissionRefresh = Date.distantPast
+    private var announcedInputPause = false
+
+    func refreshSharingPermissions() {
+        guard phase == .sharing else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastPermissionRefresh) >= Self.permissionRefreshInterval else { return }
+        lastPermissionRefresh = now
+        let current = MacHostingPermissions.refresh()
+        guard current != permissions else { return }
+        let previouslyControlled = allowsControl
+        permissions = current
+        switch HostPermissionChangePolicy.action(wasAllowingControl: previouslyControlled, canControl: canControl) {
+        case .none:
+            break
+        case .revokeControl:
+            setControlAllowed(false)
+            if !current.accessibility {
+                errorMessage = "Remote control paused. Check Accessibility permission."
+            }
+        }
+    }
+
+    /// Surface the brief window after a hot-plug/layout change where capture
+    /// geometry is rebuilt and remote input is ignored, instead of dropping it
+    /// silently. Resets as soon as new geometry is available.
+    private func announceInputPausedForDisplayChange() {
+        guard allowsControl, !announcedInputPause else { return }
+        announcedInputPause = true
+        status = "Remote control is paused while the display changes."
+    }
+
+    private func noteInputGeometryAvailable() {
+        guard input.geometry != nil else { return }
+        announcedInputPause = false
+    }
     func requestScreenRecording() {
         if !MacHostingPermissions.requestScreenRecording() { MacHostingPermissions.openScreenRecordingSettings() }
         refreshPermissions()
@@ -117,13 +164,31 @@ final class MacHostingModel: ObservableObject {
                         status = "Waiting for a Windows computer to connect."
                     case let .request(request):
                         cancelSideSwitch()
+                        // A new request replaces any earlier one. Drop its
+                        // in-flight approval so this prompt is never hidden or
+                        // left with disabled buttons.
+                        captureGeneration = UUID()
+                        captureTask?.cancel(); captureTask = nil
+                        isApproving = false; isAutoApproving = false; allowsControl = false
                         pendingRequest = request; phase = .awaitingApproval
                         status = "An incoming connection needs your approval."
+                        if defaults.bool(forKey: Self.autoAcceptAllKey)
+                            || (request.usedMasterPassword && defaults.bool(forKey: Self.masterPasswordAutoAcceptKey)) {
+                            refreshPermissions()
+                            if canView {
+                                isAutoApproving = true
+                                approve(control: canControl)
+                                // Show the prompt if approval could not start.
+                                if !isApproving { isAutoApproving = false }
+                            }
+                        }
                     case let .connected(request):
                         cancelSideSwitch()
                         let newViewer = viewer?.id != request.id
-                        viewer = request; pendingRequest = nil; isApproving = false; isEndingViewer = false; phase = .sharing
+                        viewer = request; pendingRequest = nil; isApproving = false; isAutoApproving = false
+                        isEndingViewer = false; phase = .sharing
                         input.setGeometry(capturedDisplayRevision == displayRevision ? capture.geometry : nil)
+                        noteInputGeometryAvailable()
                         status = allowsControl ? "Your Mac is being viewed and controlled." : "Your Mac is being viewed."
                         if newViewer { activateTools(session: session, viewerID: request.id, token: token) }
                     case let .chat(sessionID, text):
@@ -151,19 +216,31 @@ final class MacHostingModel: ObservableObject {
                               viewer?.id == sessionID, request.sessionID == sessionID,
                               viewer?.viewerID == request.claimedID else { continue }
                         pendingSideSwitch = request
-                    case let .captureRequested(ticket): captureNextFrame(ticket, token: token, session: session)
+                    case let .captureRequested(ticket):
+                        refreshSharingPermissions()
+                        captureNextFrame(ticket, token: token, session: session)
                     case let .input(sessionID, payload):
-                        guard allowsControl, viewer?.id == sessionID,
-                              input.geometry != nil,
-                              await session.isControlAllowed(for: sessionID) else { continue }
+                        guard allowsControl, viewer?.id == sessionID else { continue }
+                        guard input.geometry != nil else {
+                            announceInputPausedForDisplayChange()
+                            continue
+                        }
+                        guard await session.isControlAllowed(for: sessionID) else { continue }
                         guard generation == token, viewer?.id == sessionID, allowsControl,
                               input.geometry != nil else { continue }
                         do { _ = try input.handleAuthenticatedPayload(payload) }
                         catch {
-                            allowsControl = false; input.releaseAll()
-                            try? await session.setControlAllowed(false, session: sessionID)
-                            guard generation == token, viewer?.id == sessionID else { continue }
-                            errorMessage = "Remote control paused. Check Accessibility permission."
+                            switch HostInputFailurePolicy.action(for: error) {
+                            case .ignore:
+                                // A malformed or undeliverable event must not take
+                                // control away (or blame Accessibility).
+                                break
+                            case let .revokeControl(message):
+                                allowsControl = false; input.releaseAll()
+                                try? await session.setControlAllowed(false, session: sessionID)
+                                guard generation == token, viewer?.id == sessionID else { continue }
+                                errorMessage = message
+                            }
                         }
                     case .releaseInput: input.releaseAll()
                     case let .viewerEnded(reason):
@@ -177,7 +254,7 @@ final class MacHostingModel: ObservableObject {
                         captureGeneration = UUID()
                         captureTask?.cancel(); captureTask = nil
                         input.releaseAll(); viewer = nil; pendingRequest = nil
-                        allowsControl = false; isApproving = false; phase = .ready
+                        allowsControl = false; isApproving = false; isAutoApproving = false; phase = .ready
                         status = reason ?? "The Windows computer disconnected."
                     }
                 }
@@ -190,7 +267,7 @@ final class MacHostingModel: ObservableObject {
                 cancelControlUpdate(); isEndingViewer = false
                 input.releaseAll(); captureTask?.cancel(); captureGeneration = UUID()
                 phase = .failed; identifier = nil; pendingRequest = nil; viewer = nil
-                allowsControl = false; isApproving = false
+                allowsControl = false; isApproving = false; isAutoApproving = false
                 errorMessage = connectionErrorText(error)
                 status = "This Mac is unavailable for incoming connections."
                 let failed = engine; engine = nil
@@ -215,13 +292,15 @@ final class MacHostingModel: ObservableObject {
                 guard generation == token, captureGeneration == captureToken,
                       pendingRequest?.id == request.id else { return }
                 input.setGeometry(capture.geometry)
+                noteInputGeometryAvailable()
                 allowsControl = control
                 try await session.approve(request.id, firstFrame: frame, allowsControl: control)
             } catch is CancellationError {
+                if generation == token, pendingRequest?.id == request.id { isAutoApproving = false }
             } catch {
                 guard generation == token, captureGeneration == captureToken,
                       pendingRequest?.id == request.id else { return }
-                isApproving = false; allowsControl = false; input.releaseAll()
+                isApproving = false; isAutoApproving = false; allowsControl = false; input.releaseAll()
                 errorMessage = error.localizedDescription
             }
         }
@@ -229,7 +308,7 @@ final class MacHostingModel: ObservableObject {
 
     func decline() {
         guard let request = pendingRequest, let session = engine else { return }
-        pendingRequest = nil; isApproving = false; allowsControl = false
+        pendingRequest = nil; isApproving = false; isAutoApproving = false; allowsControl = false
         captureGeneration = UUID()
         captureTask?.cancel(); captureTask = nil; input.releaseAll()
         Task { await session.decline(request.id) }
@@ -356,7 +435,9 @@ final class MacHostingModel: ObservableObject {
         input.releaseAll(); capture.reset()
         let session = engine; engine = nil
         phase = .off; identifier = nil; password = ""
-        pendingRequest = nil; viewer = nil; allowsControl = false; isApproving = false
+        pendingRequest = nil; viewer = nil; allowsControl = false; isApproving = false; isAutoApproving = false
+        announcedInputPause = false
+        lastPermissionRefresh = Date.distantPast
         status = "Incoming access is paused."
         let previous = stopping
         stopping = Task {
@@ -376,13 +457,46 @@ final class MacHostingModel: ObservableObject {
         if wasRunning { stop() }
         do { _ = try MacRegistrationProfile.loadOrCreate(forHosting: true, regeneratePassword: true) }
         catch { errorMessage = "A new password could not be created: \(error.localizedDescription)"; return }
-        if wasRunning {
-            let previous = stopping
-            Task { [weak self] in
-                await previous?.value
-                self?.start()
-            }
+        if wasRunning { restartAfterStopping() }
+    }
+
+    /// Sets, changes or (with nil) removes the master password. Sharing that
+    /// was on restarts so UltraViewer learns it. Returns false on failure.
+    @discardableResult
+    func setMasterPassword(_ newPassword: String?) -> Bool {
+        guard canResetPassword else { return false }
+        // A running session keeps the registration it started with until restarted.
+        do { try MacRegistrationProfile.setMasterPassword(newPassword) }
+        catch {
+            errorMessage = "The master password could not be saved: \(error.localizedDescription)"
+            return false
         }
+        hasMasterPassword = newPassword != nil
+        if isRunning { stop(); restartAfterStopping() }
+        return true
+    }
+
+    private func restartAfterStopping() {
+        let previous = stopping
+        Task { [weak self] in
+            await previous?.value
+            self?.start()
+        }
+    }
+
+    /// Asks UltraViewer for a new ID and password for this Mac, for sharing
+    /// and for connecting to other computers. The old ID stops working.
+    func resetIdentity() {
+        guard canResetPassword else { return }
+        let wasRunning = isRunning
+        if wasRunning { stop() }
+        do {
+            _ = try MacRegistrationProfile.loadOrCreate(forHosting: true, regenerateIdentity: true)
+            _ = try MacRegistrationProfile.loadOrCreate(regenerateIdentity: true)
+        } catch {
+            errorMessage = "A new ID could not be created: \(error.localizedDescription)"; return
+        }
+        if wasRunning { restartAfterStopping() }
     }
 
     /// Stops sharing and waits until a connected viewer has been told.
@@ -444,6 +558,7 @@ final class MacHostingModel: ObservableObject {
                 guard generation == token, captureGeneration == captureToken, viewer?.id == viewerID,
                       displayRevision == displayToken else { return }
                 input.setGeometry(geometry)
+                noteInputGeometryAvailable()
             } catch {
                 guard generation == token, captureGeneration == captureToken,
                       viewer?.id == viewerID, !Task.isCancelled else { return }
@@ -455,7 +570,8 @@ final class MacHostingModel: ObservableObject {
     }
 
     private func captureSelectedDisplays() async throws -> HostedScreenFrame {
-        for _ in 0..<3 {
+        var lastError: (any Error)?
+        for attempt in 0..<HostCaptureRecoveryPolicy.maximumAttempts {
             try Task.checkCancellation()
             refreshDisplays()
             let revision = displayRevision
@@ -466,13 +582,79 @@ final class MacHostingModel: ObservableObject {
                 capturedDisplayRevision = revision
                 return frame
             } catch MacScreenCaptureError.displayConfigurationChanged {
+                // The arrangement changed while capturing: retry against the list
+                // that is current after `refreshDisplays()` on the next pass.
+                lastError = MacScreenCaptureError.displayConfigurationChanged
                 continue
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 refreshDisplays()
+                // Permission loss and the chosen display disappearing stop sharing
+                // immediately (documented behaviour). ScreenCaptureKit/CoreGraphics
+                // failures are treated as transient and retried with a short backoff
+                // so a display wake or a one-frame capture hiccup does not drop the
+                // Windows viewer.
+                guard HostCaptureRecoveryPolicy.isRetryable(error) else { throw error }
+                lastError = error
                 if displayRevision != revision { continue }
-                throw error
+                try await Task.sleep(seconds: HostCaptureRecoveryPolicy.retryDelay(attempt: attempt))
             }
         }
+        if let lastError { throw lastError }
         throw MacScreenCaptureError.displayConfigurationChanged
+    }
+}
+
+/// Pure policy for host display-capture failures: which errors are worth
+/// retrying, how many attempts a frame gets, and the short backoff between them.
+struct HostCaptureRecoveryPolicy {
+    static let maximumAttempts = 3
+    static let baseRetryDelay: TimeInterval = 0.15
+
+    /// `screenRecordingRequired` and `displayUnavailable` are terminal by product
+    /// decision. Cancellation is never a capture failure. Everything else (a
+    /// ScreenCaptureKit/CoreGraphics error or a rejected frame) gets retried.
+    static func isRetryable(_ error: any Error) -> Bool {
+        if error is CancellationError { return false }
+        guard let captureError = error as? MacScreenCaptureError else { return true }
+        switch captureError {
+        case .screenRecordingRequired, .displayUnavailable: return false
+        case .displayConfigurationChanged, .invalidFrame, .cannotRender: return true
+        }
+    }
+
+    static func retryDelay(attempt: Int) -> TimeInterval {
+        baseRetryDelay * Double(max(0, attempt) + 1)
+    }
+}
+
+/// How one failed remote input event affects the local control grant. Only a
+/// genuine permission failure should take control away; malformed or
+/// undeliverable events are dropped without changing the user's choice.
+enum HostInputFailurePolicy {
+    enum Action: Equatable {
+        case ignore
+        case revokeControl(message: String)
+    }
+
+    static func action(for error: any Error) -> Action {
+        guard let error = error as? MacHostInputError else { return .ignore }
+        switch error {
+        case .accessibilityRequired:
+            return .revokeControl(message: "Remote control paused. Check Accessibility permission.")
+        case .malformedPayload, .geometryUnavailable, .eventCreationFailed:
+            return .ignore
+        }
+    }
+}
+
+/// Permission changes while a viewer is connected: revoke control as soon as a
+/// required permission disappears, even if no app activation refreshes the UI.
+enum HostPermissionChangePolicy {
+    enum Action: Equatable { case none, revokeControl }
+
+    static func action(wasAllowingControl: Bool, canControl: Bool) -> Action {
+        wasAllowingControl && !canControl ? .revokeControl : .none
     }
 }

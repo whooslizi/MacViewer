@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UltraViewerProtocol
 
 @main
 struct MacViewerApp: App {
@@ -50,7 +51,7 @@ struct MacViewerApp: App {
         }
 
         Settings {
-            MacViewerSettings(model: model, updater: updater, agents: agents).appLanguage()
+            MacViewerSettings(model: model, hosting: hosting, updater: updater, agents: agents).appLanguage()
         }
     }
 }
@@ -58,8 +59,13 @@ struct MacViewerApp: App {
 struct MacViewerSettings: View {
     private static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
     @ObservedObject var model: ConnectionModel
+    @ObservedObject var hosting: MacHostingModel
     @ObservedObject var updater: UpdateChecker
     @ObservedObject var agents: AgentBridge
+    @AppStorage(MacHostingModel.masterPasswordAutoAcceptKey) private var masterPasswordAutoAccept = false
+    @AppStorage(MacHostingModel.autoAcceptAllKey) private var autoAcceptAll = false
+    @State private var editingMasterPassword = false
+    @State private var confirmMasterPasswordRemoval = false
     @AppStorage(ConnectionModel.rememberPartnersKey) private var rememberPartners = true
     @AppStorage("MacViewer.smoothScreen") private var smoothScreen = true
     @AppStorage("MacViewer.scrollSensitivity") private var scrollSensitivity = 1.0
@@ -68,6 +74,7 @@ struct MacViewerSettings: View {
     @AppStorage(SessionToolsModel.shareClipboardKey) private var shareClipboard = false
     @AppStorage(MacRegistrationProfile.displayNameKey) private var displayName = ""
     @AppStorage(ReceivedFilesFolder.key) private var receivedFolder = ""
+    @AppStorage(FramedTCPTransport.skipCertificateCheckKey) private var skipCertificateCheck = false
 
     var body: some View {
         TabView {
@@ -80,38 +87,68 @@ struct MacViewerSettings: View {
 
     private var general: some View {
         Form {
-            Section("Language") {
+            Section(header: Text("Language")) {
                 Picker("App language", selection: $language) {
                     ForEach(AppLanguage.allCases) { option in
                         Text(LocalizedStringKey(option.title)).tag(option.rawValue)
                     }
                 }
-                Text("Language changes apply immediately.").font(.caption).foregroundStyle(.secondary)
+                Text("Language changes apply immediately.").font(.caption).foregroundColor(.secondary)
             }
-            Section("This Mac") {
-                TextField("Display name", text: $displayName, prompt: Text(MacRegistrationProfile.defaultDisplayName))
+            Section(header: Text("This Mac")) {
+                if #available(macOS 12, *) {
+                    TextField("Display name", text: $displayName, prompt: Text(MacRegistrationProfile.defaultDisplayName))
+                } else {
+                    TextField(MacRegistrationProfile.defaultDisplayName, text: $displayName)
+                }
                 Text(LF("English letters only (no accents), up to 20 characters. The other computer sees this Mac as “%@”. Applies to new connections.",
                         MacRegistrationProfile.loginWireName(displayName).isEmpty
                             ? MacRegistrationProfile.defaultDisplayName : MacRegistrationProfile.loginWireName(displayName)))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundColor(.secondary)
             }
-            Section("History") {
+            Section(header: Text("Master password")) {
+                LabeledRow("Master password", value: L(hosting.hasMasterPassword ? "On" : "Off"))
+                HStack {
+                    Button(hosting.hasMasterPassword ? "Change Master Password…" : "Set Master Password…") {
+                        editingMasterPassword = true
+                    }
+                    if hosting.hasMasterPassword {
+                        Button("Remove") { confirmMasterPasswordRemoval = true }
+                    }
+                }.disabled(!hosting.canResetPassword)
+                Toggle("Allow master-password connections without asking", isOn: $masterPasswordAutoAccept)
+                    .disabled(!hosting.hasMasterPassword)
+                Text(hosting.canResetPassword
+                     ? "A fixed password that works alongside this Mac’s changing password. Without asking, anyone who knows it can see and control this Mac while sharing is on."
+                     : "End the current connection to change the master password.")
+                    .font(.caption).foregroundColor(masterPasswordAutoAccept && hosting.hasMasterPassword ? .orange : .secondary)
+            }
+            .sheet(isPresented: $editingMasterPassword) { MasterPasswordSheet(hosting: hosting) }
+            .appDialog(L("Remove the master password?"), isPresented: $confirmMasterPasswordRemoval, confirmation: true,
+                       message: L("Only this Mac’s changing password will work."),
+                       buttons: [DialogButton(title: L("Remove"), action: { hosting.setMasterPassword(nil) }), .cancel()])
+            Section(header: Text("Incoming connections")) {
+                Toggle("Allow all connections without asking", isOn: $autoAcceptAll)
+                Text("Skips the approval prompt. Anyone with this Mac’s ID and password can see and control it while sharing is on.")
+                    .font(.caption).foregroundColor(autoAcceptAll ? .orange : .secondary)
+            }
+            Section(header: Text("History")) {
                 Toggle("Remember successfully connected partner IDs", isOn: $rememberPartners)
                     .onChange(of: rememberPartners) { enabled in
                         if !enabled { model.clearRecentPartners() }
                     }
                 Text("Saved passwords are kept separately in macOS Keychain.")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.secondary)
                 Button("Clear Recent Partners") { model.clearRecentPartners() }
                     .disabled(model.recentPartners.isEmpty)
                 Button("Forget saved passwords", action: model.forgetSavedPasswords)
             }
-            Section("Received files") {
+            Section(header: Text("Received files")) {
                 LabeledRow("Save to") {
                     Text(ReceivedFilesFolder.current().map { ($0.path as NSString).abbreviatingWithTildeInPath }
                          ?? L("Ask when the first file arrives"))
-                        .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle).foregroundColor(.secondary)
                 }
                 HStack {
                     Button("Choose Folder…") { _ = ReceivedFilesFolder.choose() }
@@ -120,20 +157,25 @@ struct MacViewerSettings: View {
                     }
                 }
                 Text("Files you save from chat go straight into this folder. Names are never overwritten.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundColor(.secondary)
             }
             .id(receivedFolder)
-            Section("Clipboard") {
+            Section(header: Text("Clipboard")) {
                 Toggle("Share clipboard with the other computer", isOn: $shareClipboard)
                 Text("Text copied on either computer can be pasted on the other. Applies to new sessions.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundColor(.secondary)
             }
-            Section("Remote screen") {
+            Section(header: Text("Remote screen")) {
                 Toggle("Smooth image scaling", isOn: $smoothScreen)
                 Slider(value: $scrollSensitivity, in: 0.25...2, step: 0.25) {
                     Text("Scroll speed")
                 }
                 LabeledRow("Scroll speed", value: String(format: "%.2g×", scrollSensitivity))
+            }
+            Section(header: Text("Connection security")) {
+                Toggle("Skip the relay certificate check", isOn: $skipCertificateCheck)
+                Text("Only turn this on if connecting fails with a certificate error. While it is on, someone on your network could pose as the UltraViewer relay and see or change the session.")
+                    .font(.caption).foregroundColor(skipCertificateCheck ? .orange : .secondary)
             }
         }
         .groupedForm()
@@ -141,7 +183,7 @@ struct MacViewerSettings: View {
 
     private var about: some View {
         Form {
-            Section("About") {
+            Section(header: Text("About")) {
                 LabeledRow("Application", value: "MacViewer \(Self.version)")
                 LabeledRow("Author", value: MacViewerAbout.author)
                 Link("github.com/DeanOpen/MacViewer", destination: MacViewerAbout.repository)
@@ -151,10 +193,48 @@ struct MacViewerSettings: View {
                     .disabled(updater.state == .checking)
                 Text("An independent native Mac app for UltraViewer interoperability.")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.secondary)
             }
         }
         .groupedForm()
+    }
+}
+
+private struct MasterPasswordSheet: View {
+    @ObservedObject var hosting: MacHostingModel
+    @Environment(\.presentationMode) private var presentationMode
+    @State private var password = ""
+    @State private var confirmation = ""
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(hosting.hasMasterPassword ? "Change Master Password" : "Set Master Password").font(.title3.weight(.semibold))
+            Text(LF("Use %ld to %ld English letters, numbers or symbols. Enter it on the other computer like a normal password.",
+                    MacRegistrationProfile.minimumMasterPasswordLength, MacRegistrationProfile.maximumMasterPasswordLength))
+                .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            SecureField("Master password", text: $password)
+            SecureField("Confirm master password", text: $confirmation)
+            if let problem { Text(problem).font(.callout).foregroundColor(.red) }
+            HStack {
+                Spacer()
+                Button("Cancel") { presentationMode.wrappedValue.dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Save", action: save).keyboardShortcut(.defaultAction)
+                    .disabled(password.isEmpty || confirmation.isEmpty)
+            }
+        }
+        .padding(24).frame(width: 400)
+    }
+
+    private func save() {
+        guard MacRegistrationProfile.isValidMasterPassword(password) else {
+            problem = LF("Use %ld to %ld English letters, numbers or symbols.",
+                         MacRegistrationProfile.minimumMasterPasswordLength, MacRegistrationProfile.maximumMasterPasswordLength)
+            return
+        }
+        guard password == confirmation else { problem = L("The passwords do not match."); return }
+        if hosting.setMasterPassword(password) { presentationMode.wrappedValue.dismiss() }
+        else { problem = hosting.errorMessage.map(L) ?? L("The master password could not be saved.") }
     }
 }
 

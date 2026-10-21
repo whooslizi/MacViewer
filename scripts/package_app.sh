@@ -27,8 +27,10 @@ if [[ -z "$signing_identity" ]]; then
 fi
 
 # CI sets these; local builds keep the current development values.
-app_version="${MACVIEWER_VERSION:-0.3.7}"
+latest_tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+app_version="${MACVIEWER_VERSION:-${${latest_tag#v}:-0.0.0}}"
 build_number="${MACVIEWER_BUILD_NUMBER:-5}"
+minimum_system_version="${MACVIEWER_MIN_MACOS:-12}.0"
 build_flags=(--configuration "$configuration")
 if [[ "${MACVIEWER_UNIVERSAL:-0}" == "1" ]]; then
   build_flags+=(--arch arm64 --arch x86_64)
@@ -61,6 +63,16 @@ mv -f "$app_directory/Contents/MacOS/MacViewer.new" "$app_directory/Contents/Mac
 cp "$binary_directory/macviewer-mcp" "$app_directory/Contents/MacOS/macviewer-mcp.new"
 mv -f "$app_directory/Contents/MacOS/macviewer-mcp.new" "$app_directory/Contents/MacOS/macviewer-mcp"
 cp Sources/UltraViewerProtocol/Resources/8bit.dat "$app_directory/Contents/Resources/8bit.dat"
+# macOS 11 has no Swift concurrency runtime; ship the toolchain's back-deployed copy.
+if [[ "${MACVIEWER_MIN_MACOS:-12}" == "11" ]]; then
+  concurrency_library="$(dirname "$(xcrun --find swift)")/../lib/swift-5.5/macosx/libswift_Concurrency.dylib"
+  mkdir -p "$app_directory/Contents/Frameworks"
+  cp "$concurrency_library" "$app_directory/Contents/Frameworks/"
+  codesign --force --sign "$signing_identity" --timestamp=none "$app_directory/Contents/Frameworks/libswift_Concurrency.dylib"
+  for executable in MacViewer macviewer-mcp; do
+    install_name_tool -add_rpath @executable_path/../Frameworks "$app_directory/Contents/MacOS/$executable" 2>/dev/null || true
+  done
+fi
 cat > "$app_directory/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -76,13 +88,15 @@ cat > "$app_directory/Contents/Info.plist" <<PLIST
   <key>CFBundleLocalizations</key><array><string>en</string><string>vi</string></array>
   <key>CFBundleShortVersionString</key><string>$app_version</string>
   <key>CFBundleVersion</key><string>$build_number</string>
-  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSMinimumSystemVersion</key><string>$minimum_system_version</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHumanReadableCopyright</key><string>© 2026 DeanOpen · MIT License</string>
 </dict>
 </plist>
 PLIST
+# Finder metadata (com.apple.FinderInfo) on the bundle fails strict signature checks.
+xattr -cr "$app_directory"
 codesign --force --sign "$signing_identity" --timestamp=none "$app_directory/Contents/MacOS/macviewer-mcp"
 codesign --force --sign "$signing_identity" --timestamp=none "$app_directory"
 codesign --verify --deep --strict "$app_directory"
